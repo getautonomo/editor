@@ -123,7 +123,14 @@ class HDRProcessor:
 
         # 1. CEILING CLEANING (Targeting all casts)
         if 'ceiling' in masks:
-            s[masks['ceiling'] > 0] *= 0.05 
+            # [cite] Apply 5px feather to ceiling mask
+            ceiling_mask = masks['ceiling'].astype(np.float32) / 255.0
+            feathered_ceiling = cv2.GaussianBlur(ceiling_mask, (5, 5), 0)
+            
+            # [cite] Set Saturation to 0 (Perfect Neutral)
+            # We use the feathered mask to blend between original S and 0
+            # S_new = S_old * (1 - mask) + 0 * mask  =>  S_old * (1 - mask)
+            s = s * (1.0 - feathered_ceiling) 
 
         # 2. FLOOR CLEANING (Targeting Blue/Cyan Sky Reflections)
         if 'floor' in masks:
@@ -153,16 +160,133 @@ class HDRProcessor:
         corrected_img = cv2.merge([h, l, s])
         return cv2.cvtColor(corrected_img.astype(np.uint8), cv2.COLOR_HLS2BGR)
 
+    def create_tone_curve(self, contrast=0, highlights=0, shadows=0, whites=0, blacks=0):
+        """
+        Generates a Lookup Table (LUT) simulating Lightroom tone sliders.
+        Inputs are normalized roughly to -100 to 100 range (or similar scale).
+        """
+        x = np.arange(256).astype(np.float32) / 255.0
+        
+        # 1. Exposure/Tone Mapping (Shadows/Highlights)
+        # Simple polynomial or gamma conceptualization
+        # Shadows: Boost low end. Highlights: Compress high end.
+        
+        # Shadows (+60 means brighten shadows). 
+        # We can use a simple quadratic or cubic offset for the lower half.
+        # But a robust way is to use splines or composite functions.
+        # Let's use a simplified approach:
+        
+        # Highlights (- : recover/darken, + : blow out/brighten)
+        # Shadows (+ : recover/brighten, - : crush/darken)
+        
+        # Apply Shadows/Highlights using a smooth weighting function
+        # Mask for shadows (1 at 0, 0 at 1)
+        shadow_mask = 1.0 - x
+        # Mask for highlights (0 at 0, 1 at 1)
+        highlight_mask = x
+        
+        # Strength factors (tuned empirically)
+        s_factor = shadows * 0.002 # +60 -> +0.12
+        h_factor = highlights * 0.002 # -75 -> -0.15
+        
+        # Apply boosts weighted by masks (restricted to relevant ranges)
+        # Gaussian weight prefered to linear to limit effect to deep shadows/high lights
+        shadow_weight = np.exp(-((x - 0.0)**2) / 0.2)
+        highlight_weight = np.exp(-((x - 1.0)**2) / 0.2)
+        
+        y = x + (s_factor * shadow_weight) + (h_factor * highlight_weight)
+        y = np.clip(y, 0.0, 1.0)
+        
+        # 2. Whites and Blacks (Levels/Clipping equivalent)
+        # Blacks: Shift black point. Whites: Shift white point.
+        # +25 Whites means input 0.75 maps to 1.0 (roughly)? Or just boosting brights?
+        # Typically Whites increases the "white point" clipping.
+        # Blacks decreases the "black point".
+        
+        # Simplified "Levels" stretch
+        # blacks -45 -> slightly crush blacks (move black point right?)
+        # Actually in LR:
+        # Blacks < 0 : darken blacks. Blacks > 0 : lift blacks.
+        # Whites > 0 : brighten whites. Whites < 0 : darken whites.
+        
+        # Let's map this to a curve adjustment similar to S-curve but focused on ends.
+        b_shift = blacks * 0.001 # -45 -> -0.045
+        w_shift = whites * 0.001 # +25 -> +0.025
+        
+        # We can just apply this as an offset weighted to ends again, or a power curve.
+        # Let's use simple power stretch for whites/blacks effect
+        # (This is an approximation)
+        
+        # 3. Contrast (S-Curve)
+        # +10 Contrast
+        if contrast != 0:
+            c = contrast * 0.01 # +0.1
+            # S-curve formula: https://stackoverflow.com/questions/13840061
+            # k = tan((45 + c/2) * rad) ...
+            # Simpler:
+            factor = (1.01 + c) / (1.01 - c) if c < 1.0 else 1.0
+            y = 0.5 + factor * (y - 0.5)
+        
+        # Re-apply Blacks/Whites as linear stretch on the result
+        # This acts closer to setting the "white point" and "black point"
+        # Blacks -45 means we want input value X to become 0. Meaning black point moves up? 
+        # No, Blacks -45 in LR crushes blacks. So output gets darker. 
+        # So we can just subtract/add.
+        y = y + b_shift * (1-x) + w_shift * x
+        
+        return np.clip(y * 255, 0, 255).astype(np.uint8)
+
     def final_bump(self, img):
         """
-        Adds Clarity and Contrast.
+        Final Polishing Stage matching user specs:
+        Tone: Contrast +10, High -75, Shad +60, Whites +25, Blacks -45
+        Presence: Clarity +10, Texture 0
         """
-        # Simulate 'Clarity' by enhancing mid-tone contrast
-        gaussian = cv2.GaussianBlur(img, (0, 0), 10)
-        clarity_img = cv2.addWeighted(img, 1.5, gaussian, -0.5, 0)
+        print("Starting Final Bump (Lightroom Style)...")
+        current_img = img.copy()
+
+        # 1. Apply Tone Curve (Highlights, Shadows, Whites, Blacks, Contrast)
+        try:
+            # Generate LUT
+            lut = self.create_tone_curve(contrast=10, highlights=-75, shadows=60, whites=25, blacks=-45)
+            
+            # Apply to Lightness channel only (to preserve color)
+            # Or Value in HSV. LAB is best for perceptual lightness.
+            lab = cv2.cvtColor(current_img, cv2.COLOR_BGR2LAB)
+            l, a, b = cv2.split(lab)
+            
+            l_toned = cv2.LUT(l, lut)
+            
+            # Merge back
+            current_img = cv2.cvtColor(cv2.merge([l_toned, a, b]), cv2.COLOR_LAB2BGR)
+            cv2.imwrite('debug_step7_1_tone_curve.jpg', current_img)
+            print("Finished Tone Curve adjustment.")
+        except Exception as e:
+            print(f"Skipping Tone Curve due to error: {e}")
+
+        # 2. Clarity (Mid-tone Contrast)
+        # LR Clarity +10 is subtle.
+        try:
+            # Radius: Large (e.g., 20% of image dimension is robust, but fixed 20px is decent for 1022px)
+            # Amount: +10 is small. 
+            # Previous was 1.5 (huge). +10 might correspond to alpha=0.1 or 0.2
+            alpha = 0.2 
+            
+            gaussian = cv2.GaussianBlur(current_img, (0, 0), 25)
+            # Unsharp Mask: Img + alpha * (Img - Blur)
+            # = (1+alpha)*Img - alpha*Blur
+            clarity_img = cv2.addWeighted(current_img, 1.0 + alpha, gaussian, -alpha, 0)
+            
+            current_img = clarity_img
+            cv2.imwrite('debug_step7_2_clarity.jpg', current_img)
+            print("Finished Clarity (+10).")
+        except Exception as e:
+            print(f"Skipping Clarity due to error: {e}")
+
+        # 3. Texture (Explicitly 0)
+        # DISABLED
         
-        # Histogram Stretching for 'Contrast'
-        return cv2.normalize(clarity_img, None, 0, 255, cv2.NORM_MINMAX)
+        return current_img
 
     def process(self, dark_path, medium_path, bright_path, output_path):
         print("Loading exposures...")
