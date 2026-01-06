@@ -3,12 +3,12 @@
 Automated HDR processing pipeline designed for Real Estate photography.
 Features:
 - **Luminosity Masking**: Blends blended exposures to fill shadows naturally.
-- **Window Pull**: Uses **YOLO-World** (text prompt "window pane") and **SAM 2** to isolate and restore window views from Dark exposures.
+- **Window Pull (SAM 3)**: Uses **SAM 3** with native text prompting ("window pane") to isolate and restore window views from Dark exposures.
 - **Headless & GPU-Optimized**: Built for RunPod / Cloud processing.
 
 ## Structure
 - `processor.py`: Main logic.
-- `models/`: Place `sam2_s.pt` and `yolov8s-world.pt` here (will be auto-downloaded by Ultralytics if missing, or you can pre-load).
+- `models/`: PLACE `sam3_b.pt` (or similar SAM 3 weights) here. Note: SAM 3 model weights might need manual download or access request.
 - `requirements.txt`: Dependencies.
 
 ## Setup on RunPod
@@ -43,13 +43,11 @@ python processor.py --help
    - Blends Medium and Bright exposures.
 
 2. **Window Restoration**:
-   - Detects "window pane" using **YOLO-World**.
-   - Segments exact glass area using **SAM 2**.
+   - Detects and segments "window pane" using **SAM 3** with text prompts.
    - Dilates and feathers the mask.
    - Composites the **Dark** exposure into the window areas.
 
 ## Models
 The system uses:
-- `yolov8s-world.pt` (Automated window detection via text prompt)
-- `sam2_s.pt` (Precise segmentation)
+- `sam3_b.pt` (Promptable Concept Segmentation)
 All handled via `ultralytics`.
