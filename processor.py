@@ -5,15 +5,17 @@ import argparse
 import os
 from ultralytics import SAM, YOLOWorld
 
+from ultralytics.models.sam import SAM3SemanticPredictor
+
 class HDRProcessor:
     def __init__(self, use_gpu=True):
         self.device = 'cuda' if use_gpu and torch.cuda.is_available() else 'cpu'
         print(f"Using device: {self.device}")
         
-        # Load SAM 3 model
-        # Using SAM 3 which supports native text prompting (Promptable Concept Segmentation)
-        # Note: Ensure you have the correct SAM 3 model weights (e.g. sam3_b.pt)
-        self.sam_model = SAM('sam3_b.pt')
+        # Initialize the SAM 3 predictor
+        # Using the user-provided configuration pattern
+        overrides = dict(conf=0.25, model="sam3.pt", task="segment", save=False)
+        self.predictor = SAM3SemanticPredictor(overrides=overrides)
 
     def load_image(self, path):
         img = cv2.imread(path)
@@ -39,94 +41,68 @@ class HDRProcessor:
         
         return mask_blurred
 
-    def get_window_mask_sam(self, image, text_prompt="window pane"):
+    def get_window_mask_sam(self, image_path, text_prompt="window pane"):
         """
         Step 3: Window Merge
         - Segment windows using SAM 3 with text prompt.
         """
-        # Direct text prompting with SAM 3
-        # Ultralytics SAM 3 interface supports 'prompts' or arguments implied for text
-        # If specific API differs, check docs. Assuming: results = model(source, prompts=...)
-        # or separate predict method.
-        # Based on search, it supports text prompts for segmentation.
+        # Set the target image for the predictor
+        self.predictor.set_image(image_path)
         
-        # Try-catch for model loading or inference if weights not found handled by library usually
-        results = self.sam_model(image, device=self.device)
-        # Note: Validating if 'text' arg is passed this way or requires specific method call
-        # Since I can't browse live python docs easily, I will rely on standard inference
-        # If SAM 3 is wrapped same as SAM 2 but with text capability inside:
-        # We might need to handle the specific text-prompt argument if it wasn't auto-detected.
-        # However, standard YOLO/SAM usage is model(source, ...).
-        # For SAM 3 native text, we might need a specific call or it might be auto handled 
-        # BUT wait - SAM 3 in Ultralytics might not be fully standard API yet if it's very new.
-        # I'll stick to the cleanest guess: use a separate detector if needed? No, prompt says "Native".
-        # I will assume there is a way to pass text.
-        # Actually, let's use the 'bboxes' approach if text fails? No, user explicitly asked for SAM 3.
-        # I will assume prompts="window pane" is valid.
+        # Segment using text prompt (Concept Segmentation)
+        results = self.predictor(text=text_prompt)
         
-        # For now, let's assume we invoke it. If the model doesn't support text directly in this version
-        # of the library (which might be older than the SAM 3 release in the real world), 
-        # this code is hypothetical on the library support.
-        # given the user provided the sam3 repo link, they expect SAM 3 behavior.
+        # Load the image to get dimensions for mask creation
+        # (We could also get it from predictor, but we need the array for processing anyway)
+        # Using cv2.imread here again just to be safe on shape, or pass shape in.
+        # But efficiently, we should rely on the results shape.
         
-        # Note: Ultralytics 'SAM' class wrapper might not expose text args directly in __call__ 
-        # without looking at `predict` specifics.
-        # Let's try passing it in the predict method.
-        # results = self.sam_model.predict(image, prompts=[text_prompt]) seems plausible.
+        full_mask = None
         
-        # Reverting to the previous thought: The USER said "Implement SAM 3".
-        # I will implement assuming standard predict(..., prompts=...)
+        for result in results:
+            if result.masks is not None:
+                masks = result.masks.data.cpu().numpy()
+                for mask in masks:
+                    # Resize or process mask
+                    m = mask.astype(np.uint8) * 255
+                    
+                    if full_mask is None:
+                         # Initialize full_mask with proper shape
+                         full_mask = np.zeros((m.shape[0], m.shape[1]), dtype=np.uint8)
+                    
+                    if m.shape != full_mask.shape:
+                        m = cv2.resize(m, (full_mask.shape[1], full_mask.shape[0]))
+                    
+                    full_mask = cv2.bitwise_or(full_mask, m)
         
-        results = self.sam_model.predict(image, device=self.device) 
-        # WAIT - standard predict doesn't take text prompts in older versions.
-        # But if it's SAM 3, it should.
-        # Let's assume we can filter by class or prompt separate?
-        # Actually, let's look at the method again.
-        # If I can't pass text, I'd need Yolo. But I removed Yolo.
-        # I will optimistically assume `classes` or specific prompt arg works.
-        # Let's leave a comment and implementation.
-        
-        # Actual implementation check: 
-        # If Ultralytics hasn't implemented `text` arg for SAM yet, this might fail.
-        # But per the "Search Web" result: "Ultralytics fully supports... text prompts".
-        # So I will assume `prompts` kwarg.
-        
-        # However, `predict` usually returns a list of Results.
-        # And we need to ensure we filter for "window pane".
-        # This implies standard class detection? SAM is class-agnostic usually.
-        # Maybe `prompts` argument is the way.
-        
-        results = self.sam_model(image, device=self.device)
-        # TODO: Pass text prompt properly if API allows E.g. prompts="window pane"
-        # Since I don't have the exact API reference, I'll code it generic:
-        # results = self.sam_model(image, prompts=text_prompt)
-        
-        full_mask = np.zeros(image.shape[:2], dtype=np.uint8)
-        
-        # Placeholder for text prompt logic if it needs distinct API
-        # Because we cannot verify the exact API, let's stick to the structure
-        # that would support it if it existed.
-        
-        # Note: If this fails, user might need to revert or debug the specific arg.
-        
-        if len(results) > 0 and results[0].masks is not None:
-            masks = results[0].masks.data.cpu().numpy()
-            for mask in masks:
-                m = mask.astype(np.uint8) * 255
-                if m.shape != full_mask.shape:
-                    m = cv2.resize(m, (full_mask.shape[1], full_mask.shape[0]))
-                full_mask = cv2.bitwise_or(full_mask, m)
-                
+        if full_mask is None:
+             print("No windows detected.")
+             # Need to return a blank mask of image size. 
+             # We need to read image dimensions if no results.
+             temp_img = cv2.imread(image_path)
+             return np.zeros(temp_img.shape[:2], dtype=np.uint8)
+             
         return full_mask
 
     def blend_images(self, base, overlay, mask):
         # Initial blend
         mask_norm = mask.astype(float) / 255.0
         # Expand dims for 3 channels
-        mask_norm = np.repeat(mask_norm[:, :, np.newaxis], 3, axis=2)
+        if len(mask_norm.shape) == 2:
+            mask_norm = np.repeat(mask_norm[:, :, np.newaxis], 3, axis=2)
+        elif mask_norm.shape[2] == 1:
+            mask_norm = np.repeat(mask_norm, 3, axis=2)
         
         base_f = base.astype(float)
         overlay_f = overlay.astype(float)
+        
+        # Ensure shapes match
+        if base_f.shape != overlay_f.shape:
+             overlay_f = cv2.resize(overlay_f, (base_f.shape[1], base_f.shape[0]))
+        if mask_norm.shape[:2] != base_f.shape[:2]:
+             mask_norm = cv2.resize(mask_norm, (base_f.shape[1], base_f.shape[0]))
+             if len(mask_norm.shape) == 2: # Resize might lose channel dim
+                  mask_norm = np.repeat(mask_norm[:, :, np.newaxis], 3, axis=2)
         
         blended = base_f * (1.0 - mask_norm) + overlay_f * mask_norm
         return blended.astype(np.uint8)
@@ -144,7 +120,8 @@ class HDRProcessor:
         
         # --- Step 3 & 4: Window Merge ---
         # SAM 3 with text prompt on Dark exposure
-        window_mask = self.get_window_mask_sam(dark, text_prompt="window pane")
+        # Note: Passing PATH to the predictor as per user instruction
+        window_mask = self.get_window_mask_sam(dark_path, text_prompt="window pane")
         
         # Dilate mask by 2 pixels (kernel 3x3, iter 2)
         kernel = np.ones((3,3), np.uint8) 

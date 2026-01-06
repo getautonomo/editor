@@ -3,17 +3,17 @@
 Automated HDR processing pipeline designed for Real Estate photography.
 Features:
 - **Luminosity Masking**: Blends blended exposures to fill shadows naturally.
-- **Window Pull (SAM 3)**: Uses **SAM 3** with native text prompting ("window pane") to isolate and restore window views from Dark exposures.
+- **Window Pull**: Uses **SAM 3** (via `SAM3SemanticPredictor`) with native text prompting ("window pane") to isolate and restore window views from Dark exposures.
 - **Headless & GPU-Optimized**: Built for RunPod / Cloud processing.
 
 ## Structure
 - `processor.py`: Main logic.
-- `models/`: PLACE `sam3_b.pt` (or similar SAM 3 weights) here. Note: SAM 3 model weights might need manual download or access request.
+- `models/`: Place `sam3.pt` here.
 - `requirements.txt`: Dependencies.
 
 ## Setup on RunPod
 
-1. **Select a Pod**: Use the standard **PyTorch 2.x** template (e.g., `runpod/pytorch:2.0.1-py3.10-cuda11.8.0-devel`).
+1. **Select a Pod**: Use the standard **PyTorch 2.x** template.
 2. **Install Dependencies**:
    ```bash
    pip install -r requirements.txt
@@ -28,7 +28,7 @@ Features:
 
 ## Local Installation
 
-Ensure you have Python 3.8+ and a CUDA-capable GPU (optional but recommended).
+Ensure you have Python 3.8+ and a CUDA-capable GPU.
 
 ```bash
 pip install -r requirements.txt
@@ -43,11 +43,12 @@ python processor.py --help
    - Blends Medium and Bright exposures.
 
 2. **Window Restoration**:
-   - Detects and segments "window pane" using **SAM 3** with text prompts.
+   - Detects and segments "window pane" using **SAM 3** (Promptable Concept Segmentation).
    - Dilates and feathers the mask.
    - Composites the **Dark** exposure into the window areas.
 
 ## Models
 The system uses:
-- `sam3_b.pt` (Promptable Concept Segmentation)
+- `sam3.pt` (SAM 3 Model)
+Note: You must obtain `sam3.pt` appropriately.
 All handled via `ultralytics`.
