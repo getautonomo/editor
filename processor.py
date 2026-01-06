@@ -82,6 +82,88 @@ class HDRProcessor:
         blended = (overlay_f * mask_norm) + (base_f * (1.0 - mask_norm))
         return np.clip(blended, 0, 255).astype(np.uint8)
 
+    def get_semantic_masks(self, image_path, prompts):
+        """
+        Generates semantic masks for specified prompts.
+        prompts: Dictionary mapping 'name' -> 'text_prompt'
+        """
+        self.predictor.set_image(image_path)
+        img = cv2.imread(image_path)
+        h, w = img.shape[:2]
+        
+        masks = {}
+        
+        for name, prompt in prompts.items():
+            print(f"Segmenting {name}...")
+            # Detect everything first, then filter/combine
+            results = self.predictor(text=[prompt])
+            
+            combined_mask = np.zeros((h, w), dtype=np.uint8)
+            for result in results:
+               if result.masks is not None:
+                   result_masks = result.masks.data.cpu().numpy()
+                   for m in result_masks:
+                       m_resized = (m > 0).astype(np.uint8) * 255
+                       if m_resized.shape[:2] != (h, w):
+                           m_resized = cv2.resize(m_resized, (w, h), interpolation=cv2.INTER_NEAREST)
+                       combined_mask = cv2.bitwise_or(combined_mask, m_resized)
+            
+            masks[name] = combined_mask
+            
+        return masks
+
+    def apply_color_corrections(self, img, masks):
+        """
+        Generalizes color cast correction based on semantic segments.
+        masks: A dictionary containing SAM 3 masks for 'ceiling', 'floor', 'wood', 'tiles'.
+        """
+        # Convert to HLS for easier saturation manipulation
+        hls = cv2.cvtColor(img, cv2.COLOR_BGR2HLS).astype(np.float32)
+        h, l, s = cv2.split(hls)
+
+        # 1. CEILING CLEANING (Targeting all casts)
+        if 'ceiling' in masks:
+            s[masks['ceiling'] > 0] *= 0.05 
+
+        # 2. FLOOR CLEANING (Targeting Blue/Cyan Sky Reflections)
+        if 'floor' in masks:
+            # Target Blue range (Hue ~90-130 in OpenCV HLS)
+            blue_mask = cv2.inRange(h, 90, 130) 
+            floor_blue = cv2.bitwise_and(blue_mask, masks['floor'])
+            s[floor_blue > 0] *= 0.2  # Leave 20% for natural feel
+
+        # 3. CABINET/WALL CLEANING (Targeting Orange/Yellow Artificial Light)
+        # Target Yellows (Hue ~10-45)
+        orange_yellow_mask = cv2.inRange(h, 10, 45) 
+        
+        # 4. PROTECTION LOGIC (The "Selective" Step)
+        # Ensure mask is uint8 for bitwise operations
+        protection_mask = np.zeros(s.shape, dtype=np.uint8)
+        if 'wood' in masks: protection_mask = cv2.bitwise_or(protection_mask, masks['wood'])
+        if 'tiles' in masks: protection_mask = cv2.bitwise_or(protection_mask, masks['tiles'])
+        
+        # Also protect the floor from general orange reduction if not requested, but usually floor is its own thing
+        # The prompt implies general correction unless protected.
+        
+        # Apply correction only where NOT protected
+        correction_area = cv2.bitwise_and(orange_yellow_mask, cv2.bitwise_not(protection_mask))
+        s[correction_area > 0] *= 0.3 # Reduce orange cast by 70%
+
+        # Merge back and convert to BGR
+        corrected_img = cv2.merge([h, l, s])
+        return cv2.cvtColor(corrected_img.astype(np.uint8), cv2.COLOR_HLS2BGR)
+
+    def final_bump(self, img):
+        """
+        Adds Clarity and Contrast.
+        """
+        # Simulate 'Clarity' by enhancing mid-tone contrast
+        gaussian = cv2.GaussianBlur(img, (0, 0), 10)
+        clarity_img = cv2.addWeighted(img, 1.5, gaussian, -0.5, 0)
+        
+        # Histogram Stretching for 'Contrast'
+        return cv2.normalize(clarity_img, None, 0, 255, cv2.NORM_MINMAX)
+
     def process(self, dark_path, medium_path, bright_path, output_path):
         print("Loading exposures...")
         dark = cv2.imread(dark_path)
@@ -112,9 +194,36 @@ class HDRProcessor:
         # Soften edges (feather) by 2px [cite: 91, 168]
         feathered_window_mask = cv2.GaussianBlur(dilated_mask.astype(np.float32) / 255.0, (11, 11), 0)
         
-        # Step 4: Final Merge [cite: 31, 32, 170]
+        # Step 4: Blend Window
+        print("Blending window exposure...")
         # Overlay dark window view onto the blended interior [cite: 170]
-        final_result = self.blend_images(merged_base, dark, feathered_window_mask)
+        final_with_window = self.blend_images(merged_base, dark, feathered_window_mask)
+        cv2.imwrite('step4_window_blend.jpg', final_with_window)
+        
+        # Step 5: Semantic Feature Detection
+        print("Generating semantic masks for color correction...")
+        # Dictionary of things to find
+        prompts = {
+            'ceiling': 'ceiling',
+            'floor': 'floor',
+            'wood': 'wood cabinets, wood floor, wood furniture', # targeted wood prompt
+            'tiles': 'tiled floor, tiled wall'
+        }
+        # Using medium exposure for semantic segmentation as it's the most balanced
+        semantic_masks = self.get_semantic_masks(medium_path, prompts)
+        
+        # Debug: Save semantic masks
+        for name, mask in semantic_masks.items():
+            cv2.imwrite(f'debug_mask_{name}.png', mask)
+
+        # Step 6: Smart Color Correction
+        print("Applying semantic color corrections...")
+        corrected_img = self.apply_color_corrections(final_with_window, semantic_masks)
+        cv2.imwrite('step6_color_corrected.jpg', corrected_img)
+        
+        # Step 7: Final Polish
+        print("Applying final clarity and contrast...")
+        final_result = self.final_bump(corrected_img)
         
         cv2.imwrite(output_path, final_result)
         print(f"Process complete. Saved to: {output_path}")
