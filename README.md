@@ -47,6 +47,17 @@ python processor.py --help
    - Dilates and feathers the mask.
    - Composites the **Dark** exposure into the window areas.
 
+3. **Semantic White Balancing**:
+    - Uses SAM 3 to identify **Ceiling**, **Floor**, **Wood**, and **Tiles**.
+    - **Ceiling**: Sets saturation to 0 (Neutralize casts).
+    - **Floor**: Removes blue casts (sky reflections).
+    - **Walls/Cabinets**: Removes orange casts (artificial light), protected by Wood/Tile masks.
+
+4. **Final Polishing (Lightroom Emulation)**:
+    - **Tone Mapping**: Applies a custom tone curve matching professional editor settings (Highlights -75, Shadows +60, Whites +25, Blacks -45, Contrast +10).
+    - **Clarity**: Increases mid-tone contrast (+10).
+    - **Texture**: (Disabled by default) Can enhance fine details.
+
 ## Models
 The system uses:
 - `sam3.pt` (SAM 3 Model)
