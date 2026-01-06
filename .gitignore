@@ -1,0 +1,9 @@
+*.jpg
+*.png
+*.jpeg
+*.tif
+*.tiff
+__pycache__/
+*.pt
+/models/*.pt
+.DS_Store
